@@ -1,0 +1,27 @@
+# Les trois serveurs en local : docker compose up
+# Puis http://localhost:8081/mcp (hockey), :8082 (météo), :8083 (articles).
+services:
+  hockey:
+    image: python:3.14.8-alpine3.24
+    command: ["python3", "-I", "/app/server.py"]
+    volumes: ["./hockey:/app:ro"]
+    environment:
+      HOCKEY_EQUIPE: ${HOCKEY_EQUIPE:-}
+    ports: ["8081:8080"]
+  meteo:
+    image: python:3.14.8-alpine3.24
+    command: ["python3", "-I", "/app/server.py"]
+    volumes: ["./meteo:/app:ro"]
+    environment:
+      METEO_LIEU: ${METEO_LIEU:-}
+      METEO_NOM: ${METEO_NOM:-}
+    ports: ["8082:8080"]
+  articles:
+    image: python:3.14.8-alpine3.24
+    command: ["python3", "-I", "/app/server.py"]
+    volumes: ["./articles:/app:ro"]
+    environment:
+      # Un Ollama sur l'hôte, avec bge-m3 ; sans lui, recherche par mots.
+      ARTICLES_EMBED: ${ARTICLES_EMBED:-http://host.docker.internal:11434/api/embed}
+    extra_hosts: ["host.docker.internal:host-gateway"]
+    ports: ["8083:8080"]

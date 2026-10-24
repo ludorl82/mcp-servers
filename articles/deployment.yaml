@@ -1,0 +1,72 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: articles-mcp
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: articles-mcp
+  template:
+    metadata:
+      labels:
+        app: articles-mcp
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: server
+          image: python:3.14.8-alpine3.24
+          command: ["python3", "-I", "/app/server.py"]
+          env:
+            - name: PORT
+              value: "8080"
+            - name: PYTHONUNBUFFERED
+              value: "1"
+            # ARTICLES_EMBED : l'Ollama qui vectorise la question. À ajouter par un
+            # patch ; sans lui, la recherche se fait par les mots seulement.
+          ports:
+            - containerPort: 8080
+              name: http
+          readinessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 15
+            timeoutSeconds: 3
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - name: server
+              mountPath: /app
+              readOnly: true
+          resources:
+            # ~50 Mi une fois le corpus chargé (1 500 tronçons et leurs vecteurs) ;
+            # le rechargement horaire en tient brièvement deux copies.
+            requests: { cpu: 10m, memory: 64Mi }
+            limits: { memory: 256Mi }
+      volumes:
+        - name: server
+          configMap:
+            name: articles-mcp-server
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: articles-mcp
+spec:
+  selector:
+    app: articles-mcp
+  ports:
+    - name: http
+      port: 80
+      targetPort: http

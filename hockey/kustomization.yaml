@@ -1,0 +1,18 @@
+# Base Kustomize pour hockey : un Deployment et un Service, sans namespace.
+# server.py est monté depuis un ConfigMap généré ; son nom porte un hash du
+# fichier, donc un changement de server.py redéploie le pod. Pas d'image à
+# construire : l'image python officielle suffit, rien n'est installé.
+#
+# S'en servir de l'extérieur :
+#   resources:
+#     - https://github.com/ludorl82/mcp-servers//hockey?ref=<commit>
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - deployment.yaml
+
+configMapGenerator:
+  - name: hockey-mcp-server
+    files:
+      - server.py
