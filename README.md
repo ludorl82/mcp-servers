@@ -18,6 +18,22 @@ modèle qui appelle l'outil n'a que ce texte pour décider, et la personne qui
 écoute n'a pas d'écran. C'est aussi vrai des messages d'erreur : chacun dit
 ce qui ne va pas et quoi faire ensuite.
 
+## Essayer sans rien installer
+
+Le serveur `articles` est ouvert à tous :
+
+```
+https://articles.labodeludo.dev/mcp
+```
+
+Dans l'appli Claude : *Paramètres → Connecteurs → Ajouter un connecteur
+personnalisé*, avec cette adresse. Pas de compte, pas de clé ; il ne fait que
+lire le blogue. Le débit est limité, et chaque recherche passe par une carte
+graphique du labo : pour un usage soutenu, lancez votre copie.
+
+`hockey` et `meteo` n'ont pas d'adresse publique : ils se lancent en une
+commande (plus bas), et leurs API sources ont leurs propres limites.
+
 ## Le transport
 
 MCP « Streamable HTTP » réduit au strict nécessaire, ce que la spécification
@@ -93,4 +109,5 @@ Three stdlib-only Python MCP servers (Streamable HTTP, stateless, plain JSON
 responses): Canadian NHL teams, weather with Canadian alerts and air quality,
 and semantic search over the labodeludo.dev blog. Answers are in French and
 written to be read aloud. Run with `python3 <server>/server.py`; configure
-through the environment variables above. MIT licence.
+through the environment variables above. The `articles` server is open at
+`https://articles.labodeludo.dev/mcp` (rate-limited). MIT licence.
