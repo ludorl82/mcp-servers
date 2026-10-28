@@ -1,6 +1,6 @@
 # mcp-servers
 
-Trois serveurs [MCP](https://modelcontextprotocol.io) écrits pour le labo de
+Quatre serveurs [MCP](https://modelcontextprotocol.io) écrits pour le labo de
 [labodeludo.dev](https://labodeludo.dev), où ils servent l'appli Claude (en
 mode vocal aussi) et un assistant Home Assistant. Un seul fichier Python
 chacun, **la bibliothèque standard seulement** : rien à installer, rien à
@@ -11,6 +11,7 @@ construire.
 | [`hockey/`](hockey/server.py) | Les sept équipes canadiennes de la LNH : horaire, pointage en direct avec les marqueurs, résultats, classement, statistiques des joueurs | API publique de la LNH, sans clé |
 | [`meteo/`](meteo/server.py) | Météo actuelle, prévisions, heure par heure ; alertes et Cote air santé au Canada | [Open-Meteo](https://open-meteo.com) (CC BY 4.0), Environnement et Changement climatique Canada (Licence du gouvernement ouvert – Canada) |
 | [`articles/`](articles/server.py) | Chercher par le sens dans les articles de labodeludo.dev, en lire un, lister les derniers | Le site lui-même, et un [Ollama](https://ollama.com) pour vectoriser la question |
+| [`web/`](web/server.py) | Lire une page web en direct : son texte, et surtout où elle mène (chaque redirection, l'adresse finale, l'avertissement quand on change de site) | La page demandée. **Un proxy : à garder privé**, voir plus bas |
 
 Les réponses sont en français, en **phrases courtes prêtes à lire à voix
 haute** : pas de tableau, pas de JSON, l'heure dite comme on la dit. Le
@@ -31,8 +32,37 @@ personnalisé*, avec cette adresse. Pas de compte, pas de clé ; il ne fait que
 lire le blogue. Le débit est limité, et chaque recherche passe par une carte
 graphique du labo : pour un usage soutenu, lancez votre copie.
 
-`hockey` et `meteo` n'ont pas d'adresse publique : ils se lancent en une
+`hockey`, `meteo` et `web` n'ont pas d'adresse publique : ils se lancent en une
 commande (plus bas), et leurs API sources ont leurs propres limites.
+
+## `web`, un serveur à garder privé
+
+Un index de recherche peut montrer une vieille copie d'un site qui, en vrai,
+redirige ailleurs depuis des années. `web` lit la page en direct et met les
+redirections en tête de sa réponse :
+
+```
+Attention : lbdl.dev redirige vers un AUTRE site, labodeludo.dev. La page lue est celle de labodeludo.dev.
+Adresse demandée : http://lbdl.dev/
+Redirections (1) :
+  1. 301 (déplacée pour de bon) : http://lbdl.dev/ → https://labodeludo.dev/
+Adresse finale : https://labodeludo.dev/
+```
+
+Il suit les redirections HTTP et la balise `<meta http-equiv="refresh">` ; il
+n'exécute pas le JavaScript, mais signale une page presque vide qui redirige
+par `window.location`. Le texte rendu laisse de côté menus, en-têtes et pieds
+de page.
+
+Un serveur qui va chercher l'adresse qu'on lui donne est un **proxy** : ne
+le mettez jamais derrière une adresse publique sans authentification. Il se
+défend quand même. Il refuse toute adresse qui n'est pas sur Internet
+(privée, locale, CGNAT, lien local comme `169.254.169.254`), à chaque saut
+de redirection, et se connecte à l'adresse IP qu'il vient de vérifier plutôt
+que de résoudre le nom une deuxième fois. Ports 80 et 443 seulement, pas
+d'identifiant dans l'adresse. Dans Kubernetes, sa base ajoute une
+NetworkPolicy de sortie qui refait la même chose au niveau du réseau ;
+l'entrée, elle, est à fermer selon votre déploiement.
 
 ## Le transport
 
@@ -54,7 +84,8 @@ python3 hockey/server.py                       # écoute sur :8080
 PORT=8082 METEO_LIEU="Sherbrooke" python3 meteo/server.py
 ```
 
-Les trois ensemble, avec Docker : `docker compose up` (ports 8081 à 8083).
+Tous ensemble, avec Docker : `docker compose up` (ports 8081 à 8084 ;
+`web` n'écoute que sur 127.0.0.1).
 
 Pour essayer à la main :
 
@@ -64,7 +95,7 @@ curl -s localhost:8080/mcp -H 'Content-Type: application/json' -d \
 ```
 
 Dans Kubernetes, chaque dossier est une base Kustomize (un Deployment et un
-Service, sans namespace ; `server.py` monté depuis un ConfigMap sur l'image
+Service, plus la NetworkPolicy de sortie de `web`, sans namespace ; `server.py` monté depuis un ConfigMap sur l'image
 `python` officielle) :
 
 ```yaml
@@ -100,14 +131,17 @@ format (voir l'en-tête de [`articles/server.py`](articles/server.py)).
 python3 -m unittest discover -s tests -v
 ```
 
-Hors ligne : le protocole, la configuration, le transport HTTP. Aucun appel
-aux API.
+Hors ligne : le protocole, la configuration, le transport HTTP, et pour
+`web` les redirections et l'extraction contre un faux site local. Aucun
+appel aux API.
 
 ## English
 
-Three stdlib-only Python MCP servers (Streamable HTTP, stateless, plain JSON
+Four stdlib-only Python MCP servers (Streamable HTTP, stateless, plain JSON
 responses): Canadian NHL teams, weather with Canadian alerts and air quality,
-and semantic search over the labodeludo.dev blog. Answers are in French and
+semantic search over the labodeludo.dev blog, and a web page reader that
+reports every redirect and the final URL. The web reader is a proxy: keep it
+private; it refuses non-public addresses on every hop and pins the checked IP. Answers are in French and
 written to be read aloud. Run with `python3 <server>/server.py`; configure
 through the environment variables above. The `articles` server is open at
 `https://articles.labodeludo.dev/mcp` (rate-limited). MIT licence.

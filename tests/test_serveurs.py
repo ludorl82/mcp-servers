@@ -1,7 +1,9 @@
-"""Tests hors ligne des trois serveurs : le protocole MCP et la configuration.
+"""Tests hors ligne des serveurs : le protocole MCP et la configuration.
 
 Aucun appel réseau : chaque cas s'arrête avant l'API (outil inconnu, équipe
-inconnue, lieu absent), ou ne touche que le serveur HTTP local.
+inconnue, lieu absent), ou ne touche que le serveur HTTP local. Pour `web`,
+un faux site sur 127.0.0.1 joue les redirections ; seul ce test lève le
+refus des adresses locales.
 
     python3 -m unittest discover -s tests -v
 """
@@ -12,10 +14,11 @@ import threading
 import unittest
 import urllib.error
 import urllib.request
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 RACINE = Path(__file__).resolve().parent.parent
-SERVEURS = {"hockey": "match_lnh", "meteo": "meteo", "articles": "chercher_articles"}
+SERVEURS = {"hockey": "match_lnh", "meteo": "meteo", "articles": "chercher_articles", "web": "lire_page"}
 VARIABLES = ("HOCKEY_EQUIPE", "METEO_LIEU", "METEO_NOM", "HOST", "PORT")
 
 
@@ -97,6 +100,121 @@ class Meteo(unittest.TestCase):
         textes = m.INSTRUCTIONS + json.dumps(appel(m, "tools/list")["result"], ensure_ascii=False)
         self.assertNotIn("Sherbrooke", textes)
         self.assertIn("le chalet", textes)
+
+
+class FauxSite(BaseHTTPRequestHandler):
+    """Deux « sites » sur le même port, distingués par l'en-tête Host."""
+    PAGES = {
+        "/": (200, "<html lang='fr'><head><title>Accueil</title></head><body>"
+                   "<nav>Menu Accueil Contact</nav><main><h1>Bonjour</h1><p>Le <b>vrai</b> texte.</p>"
+                   "<svg><title>icône</title></svg></main><footer>Pied</footer></body></html>"),
+        "/vieux": (301, "/neuf"),
+        "/neuf": (302, "http://ailleurs.test:{port}/profil"),
+        "/profil": (200, "<title>Profil</title><p>Ailleurs, maintenant.</p>"),
+        "/meta": (200, "<meta http-equiv='refresh' content='0; url=/'><p>On vous redirige…</p>"),
+        "/boucle": (302, "/boucle2"),
+        "/boucle2": (302, "/boucle"),
+        "/fuite": (302, "http://10.0.0.1:{port}/"),
+        "/texte": (200, "simple texte"),
+        "/image": (200, "PNG"),
+    }
+
+    def do_GET(self):
+        code, contenu = self.PAGES.get(self.path, (404, "<p>Introuvable</p>"))
+        self.send_response(code)
+        if 300 <= code < 400:
+            self.send_header("Location", contenu.format(port=self.server.server_address[1]))
+            contenu = ""
+        ctype = {"/texte": "text/plain", "/image": "image/png"}.get(self.path, "text/html; charset=utf-8")
+        corps = contenu.encode()
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(corps)))
+        self.end_headers()
+        self.wfile.write(corps)
+
+    def log_message(self, *a):
+        pass
+
+
+class Web(unittest.TestCase):
+    def setUp(self):
+        self.m = charge("web")
+        site = ThreadingHTTPServer(("127.0.0.1", 0), FauxSite)
+        threading.Thread(target=site.serve_forever, daemon=True).start()
+        self.addCleanup(site.shutdown)
+        self.port = site.server_address[1]
+        # Le faux site est sur 127.0.0.1 : on lève le refus pour ses noms seuls,
+        # et on accepte son port (le serveur ne lit que 80 et 443).
+        vraie = self.m.verifie
+        self.m.verifie = lambda hote, port: "127.0.0.1" if hote.endswith(".test") else vraie(hote, port)
+        self.m.PORTS = {"http": self.port, "https": 443}
+
+    def lis(self, chemin, hote="site.test", **args):
+        r = appel(self.m, "tools/call", {"name": "lire_page",
+                                        "arguments": {"url": f"http://{hote}:{self.port}{chemin}", **args}})
+        return r["result"]["content"][0]["text"], r["result"]["isError"]
+
+    def test_texte_sans_les_accessoires(self):
+        texte, erreur = self.lis("/")
+        self.assertFalse(erreur)
+        self.assertIn("aucune redirection", texte)
+        self.assertIn("Titre : Accueil", texte)
+        self.assertIn("Langue : fr", texte)
+        self.assertIn("Bonjour\nLe vrai texte.", texte)
+        for absent in ("Menu", "Pied", "icône"):
+            self.assertNotIn(absent, texte)
+
+    def test_redirections_vers_un_autre_site(self):
+        texte, erreur = self.lis("/vieux")
+        self.assertFalse(erreur)
+        self.assertTrue(texte.startswith("Attention : site.test redirige vers un AUTRE site, ailleurs.test."), texte)
+        self.assertIn("Redirections (2)", texte)
+        # Le port du faux site passe pour le port par défaut : les adresses sont dites sans lui.
+        self.assertIn("1. 301 (déplacée pour de bon) : http://site.test/vieux → http://site.test/neuf", texte)
+        self.assertIn("2. 302 (déplacée pour l'instant) : http://site.test/neuf → http://ailleurs.test/profil", texte)
+        self.assertIn("Adresse finale : http://ailleurs.test/profil", texte)
+        self.assertIn("Ailleurs, maintenant.", texte)
+
+    def test_meta_refresh(self):
+        texte, _ = self.lis("/meta")
+        self.assertIn("balise meta refresh", texte)
+        self.assertIn("sans changer de site", texte)
+        self.assertIn("Le vrai texte.", texte)
+
+    def test_redirection_vers_une_adresse_privee(self):
+        texte, erreur = self.lis("/fuite")
+        self.assertTrue(erreur)
+        self.assertIn("pas sur Internet (10.0.0.1)", texte)
+        self.assertIn("redirection depuis http://site.test/fuite", texte)
+
+    def test_boucle(self):
+        texte, erreur = self.lis("/boucle")
+        self.assertTrue(erreur)
+        self.assertIn("tournent en rond", texte)
+
+    def test_erreur_et_types(self):
+        texte, erreur = self.lis("/absente")
+        self.assertFalse(erreur)
+        self.assertIn("404 (introuvable)", texte)
+        self.assertIn("page d'erreur du site", texte)
+        self.assertIn("simple texte", self.lis("/texte")[0])
+        self.assertIn("pas une page de texte (image/png)", self.lis("/image")[0])
+
+    def test_suite(self):
+        texte, _ = self.lis("/", caracteres=500, debut=10)
+        self.assertIn("à partir du caractère 10", texte)
+
+    def test_refus(self):
+        m = charge("web")
+        for url, raison in (("http://127.0.0.1/", "pas sur Internet"), ("http://10.1.2.3/", "pas sur Internet"),
+                            ("http://169.254.169.254/latest/", "pas sur Internet"), ("http://[::1]/", "pas sur Internet"),
+                            ("http://[::ffff:192.168.0.1]/", "pas sur Internet"), ("http://100.64.0.1/", "pas sur Internet"),
+                            ("ftp://exemple.com/", "http ou https"), ("exemple.com:22", "port 22"),
+                            ("https://moi:secret@exemple.com/", "mot de passe"), ("", "Il faut une adresse")):
+            with self.subTest(url=url):
+                r = appel(m, "tools/call", {"name": "lire_page", "arguments": {"url": url}})["result"]
+                self.assertTrue(r["isError"])
+                self.assertIn(raison, r["content"][0]["text"])
 
 
 class Http(unittest.TestCase):

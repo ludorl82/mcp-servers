@@ -1,5 +1,6 @@
-# Les trois serveurs en local : docker compose up
-# Puis http://localhost:8081/mcp (hockey), :8082 (météo), :8083 (articles).
+# Les serveurs en local : docker compose up
+# Puis http://localhost:8081/mcp (hockey), :8082 (météo), :8083 (articles), :8084 (web).
+# web n'écoute que sur 127.0.0.1 : il va chercher n'importe quelle page.
 services:
   hockey:
     image: python:3.14.8-alpine3.24
@@ -25,3 +26,8 @@ services:
       ARTICLES_EMBED: ${ARTICLES_EMBED:-http://host.docker.internal:11434/api/embed}
     extra_hosts: ["host.docker.internal:host-gateway"]
     ports: ["8083:8080"]
+  web:
+    image: python:3.14.8-alpine3.24
+    command: ["python3", "-I", "/app/server.py"]
+    volumes: ["./web:/app:ro"]
+    ports: ["127.0.0.1:8084:8080"]

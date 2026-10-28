@@ -1,0 +1,53 @@
+# La sortie du serveur : le DNS du cluster, et les ports 80 et 443 vers
+# Internet seulement. Les plages privées, locales, CGNAT et de lien local
+# (169.254.169.254, les métadonnées d'un nuage) sont exclues : même si la
+# vérification de server.py ratait un cas, le cluster ne laisserait pas
+# passer. Il faut un plugin réseau qui applique les NetworkPolicy en sortie.
+#
+# L'entrée n'est pas fermée ici : qui peut appeler le serveur dépend de
+# l'endroit où on le déploie. Ajoutez une règle d'entrée à côté.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: web-mcp-sortie-internet
+spec:
+  podSelector:
+    matchLabels:
+      app: web-mcp
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 0.0.0.0/8
+              - 10.0.0.0/8
+              - 100.64.0.0/10
+              - 127.0.0.0/8
+              - 169.254.0.0/16
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              - 198.18.0.0/15
+              - 224.0.0.0/3
+        - ipBlock:
+            cidr: ::/0
+            except:
+              - ::/8
+              - 64:ff9b::/96
+              - fc00::/7
+              - fe80::/10
+              - ff00::/8
+      ports:
+        - { protocol: TCP, port: 80 }
+        - { protocol: TCP, port: 443 }
