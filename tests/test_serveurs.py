@@ -13,6 +13,7 @@ import os
 import threading
 import unittest
 import urllib.error
+import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -235,6 +236,83 @@ class Http(unittest.TestCase):
             with self.assertRaises(urllib.error.HTTPError) as e:
                 urllib.request.urlopen(base + chemin)
             self.assertEqual(e.exception.code, code)
+
+
+PUBLICS = ("hockey", "meteo", "articles")
+
+
+class OAuthOuvert(unittest.TestCase):
+    def setUp(self):
+        m = charge("meteo", HOST="127.0.0.1")
+        serveur = m.ThreadingHTTPServer(("127.0.0.1", 0), m.Handler)
+        threading.Thread(target=serveur.serve_forever, daemon=True).start()
+        self.addCleanup(serveur.shutdown)
+        self.base = f"http://127.0.0.1:{serveur.server_address[1]}"
+
+    def demande(self, chemin, corps=None, ctype="application/json"):
+        req = urllib.request.Request(self.base + chemin, corps, {"Content-Type": ctype} if corps else {})
+        try:
+            with urllib.request.urlopen(req) as r:
+                return r.status, r.headers, json.loads(r.read() or b"null")
+        except urllib.error.HTTPError as e:
+            return e.code, e.headers, json.loads(e.read() or b"null")
+
+    def test_meme_bloc_partout(self):
+        def bloc(nom):
+            t = (RACINE / nom / "server.py").read_text()
+            return t[t.index("# --- OAuth ouvert"):t.index("# --- fin de l'OAuth ouvert ---")]
+        for nom in PUBLICS[1:]:
+            with self.subTest(serveur=nom):
+                self.assertEqual(bloc(nom), bloc(PUBLICS[0]))
+
+    def test_metadonnees(self):
+        code, _, ressource = self.demande("/.well-known/oauth-protected-resource/mcp")
+        self.assertEqual(code, 200)
+        self.assertEqual(ressource["resource"], self.base + "/mcp")
+        code, _, serveur = self.demande("/.well-known/oauth-authorization-server")
+        self.assertEqual(serveur["issuer"], ressource["authorization_servers"][0])
+        self.assertEqual(serveur["registration_endpoint"], self.base + "/register")
+        self.assertIn("S256", serveur["code_challenge_methods_supported"])
+
+    def test_flux_complet(self):
+        retour = "https://oauth-redirect.googleusercontent.com/r/user_bound_custom-mcp-1-meteo_tptpt_net"
+        code, _, client = self.demande("/register", json.dumps(
+            {"client_name": "Google", "redirect_uris": [retour], "token_endpoint_auth_method": "client_secret_post"}).encode())
+        self.assertEqual(code, 201)
+        self.assertTrue(client["client_id"] and client["client_secret"])
+        q = urllib.parse.urlencode({"client_id": client["client_id"], "redirect_uri": retour, "response_type": "code",
+                                    "state": "abc", "code_challenge": "x", "code_challenge_method": "S256"})
+        ouvreur = urllib.request.build_opener(type("SansSuivre", (urllib.request.HTTPRedirectHandler,),
+                                                   {"redirect_request": lambda *a: None}))
+        with self.assertRaises(urllib.error.HTTPError) as e:
+            ouvreur.open(self.base + "/authorize?" + q)
+        self.assertEqual(e.exception.code, 302)
+        lieu = urllib.parse.urlparse(e.exception.headers["Location"])
+        self.assertEqual(lieu._replace(query="").geturl(), retour)
+        p = dict(urllib.parse.parse_qsl(lieu.query))
+        self.assertEqual(p["state"], "abc")
+        code, entetes, jeton = self.demande("/token", urllib.parse.urlencode(
+            {"grant_type": "authorization_code", "code": p["code"], "code_verifier": "y"}).encode(),
+            "application/x-www-form-urlencoded")
+        self.assertEqual((code, jeton["token_type"]), (200, "Bearer"))
+        self.assertEqual(entetes["Cache-Control"], "no-store")
+        code, _, _ = self.demande("/token", b"grant_type=password", "application/x-www-form-urlencoded")
+        self.assertEqual(code, 400)
+
+    def test_pas_de_redirection_ouverte(self):
+        for retour in ("https://ailleurs.example/cb", "https://claude.ai/api/mcp/auth_callback/x",
+                       "https://oauth-redirect.googleusercontent.com.ailleurs.example/r/x"):
+            with self.subTest(retour=retour):
+                q = urllib.parse.urlencode({"redirect_uri": retour, "response_type": "code"})
+                code, entetes, _ = self.demande("/authorize?" + q)
+                self.assertEqual(code, 400)
+                self.assertIsNone(entetes["Location"])
+
+    def test_mcp_sans_jeton(self):
+        code, _, r = self.demande("/mcp", json.dumps({"jsonrpc": "2.0", "id": 1, "method": "ping"}).encode())
+        self.assertEqual((code, r["result"]), (200, {}))
+        code, _, _ = self.demande("/register", b"{}")
+        self.assertEqual(code, 400)
 
 
 if __name__ == "__main__":

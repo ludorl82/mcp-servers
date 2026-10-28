@@ -33,6 +33,8 @@ temporel en DERNIER, comme l'ancien script : le modèle choisit ce qu'il dit.
 import json
 import math
 import os
+import re
+import secrets
 import sys
 import threading
 import time
@@ -544,10 +546,84 @@ def handle(msg):
     return err(-32601, f"Méthode inconnue : {method}")
 
 
+# --- OAuth ouvert : le même bloc dans hockey, meteo et articles (un test le vérifie) ---
+# Le Gemini grand public (connecteurs personnalisés) n'ajoute pas un serveur MCP
+# sans OAuth : il cherche /.well-known/oauth-protected-resource et abandonne sur
+# un 404 (2026-10-28). Les données sont publiques, alors l'autorisation approuve
+# toute seule : enregistrement dynamique, /authorize qui renvoie tout de suite
+# un code, /token qui rend un jeton. /mcp ne vérifie AUCUN jeton : avec ou sans,
+# la réponse est la même. Seule garde : /authorize ne renvoie que vers des
+# adresses de retour connues, pour ne pas servir de redirection ouverte.
+RETOURS_OUVERTS = re.compile(r"^(https://oauth-redirect(-sandbox|-test)?\.googleusercontent\.com/"
+                             r"|https://claude\.(ai|com)/api/mcp/auth_callback$"
+                             r"|http://(localhost|127\.0\.0\.1)(:\d+)?/)")
+METHODES_CLIENT = ("none", "client_secret_post", "client_secret_basic")
+
+
+def base_ouverte(entetes):
+    # L'émetteur doit être l'adresse que le client a appelée : on la tire de Host.
+    hote = entetes.get("Host") or "localhost"
+    if not re.fullmatch(r"[A-Za-z0-9.-]+(:\d+)?", hote):
+        hote = "localhost"
+    return ("http://" if hote.split(":")[0] in ("localhost", "127.0.0.1") else "https://") + hote
+
+
+def oauth_get(chemin, requete, entetes):
+    """GET d'OAuth → (code, corps, entêtes), ou None si le chemin n'en est pas."""
+    base = base_ouverte(entetes)
+    if chemin in ("/.well-known/oauth-protected-resource", "/.well-known/oauth-protected-resource/mcp"):
+        return 200, {"resource": base + "/mcp", "authorization_servers": [base],
+                     "bearer_methods_supported": ["header"]}, {}
+    if chemin in ("/.well-known/oauth-authorization-server", "/.well-known/oauth-authorization-server/mcp"):
+        return 200, {"issuer": base, "authorization_endpoint": base + "/authorize",
+                     "token_endpoint": base + "/token", "registration_endpoint": base + "/register",
+                     "response_types_supported": ["code"],
+                     "grant_types_supported": ["authorization_code", "refresh_token"],
+                     "code_challenge_methods_supported": ["S256"],
+                     "token_endpoint_auth_methods_supported": list(METHODES_CLIENT)}, {}
+    if chemin == "/authorize":
+        p = dict(urllib.parse.parse_qsl(requete))
+        retour = p.get("redirect_uri", "")
+        if not RETOURS_OUVERTS.match(retour) or p.get("response_type") != "code":
+            return 400, {"error": "invalid_request", "error_description": "Adresse de retour inconnue."}, {}
+        q = {"code": secrets.token_urlsafe(24), "iss": base}
+        if p.get("state"):
+            q["state"] = p["state"]
+        return 302, None, {"Location": retour + ("&" if "?" in retour else "?") + urllib.parse.urlencode(q)}
+    return None
+
+
+def oauth_post(chemin, corps):
+    """POST à /register ou /token → (code, corps, entêtes)."""
+    if chemin == "/register":
+        try:
+            d = json.loads(corps or b"{}")
+        except ValueError:
+            d = None
+        uris = d.get("redirect_uris") if isinstance(d, dict) else None
+        if not isinstance(uris, list) or not uris or not all(isinstance(u, str) for u in uris):
+            return 400, {"error": "invalid_redirect_uri", "error_description": "redirect_uris manque."}, {}
+        methode = d.get("token_endpoint_auth_method") or "none"
+        methode = methode if methode in METHODES_CLIENT else "none"
+        r = {"client_id": secrets.token_urlsafe(16), "client_id_issued_at": int(time.time()),
+             "client_name": str(d.get("client_name") or "client")[:80], "redirect_uris": uris,
+             "grant_types": ["authorization_code", "refresh_token"], "response_types": ["code"],
+             "token_endpoint_auth_method": methode}
+        if methode != "none":
+            r["client_secret"], r["client_secret_expires_at"] = secrets.token_urlsafe(24), 0
+        return 201, r, {}
+    form = dict(urllib.parse.parse_qsl(corps.decode("utf-8", "replace")))
+    if form.get("grant_type") not in ("authorization_code", "refresh_token"):
+        return 400, {"error": "unsupported_grant_type"}, {}
+    return 200, {"access_token": secrets.token_urlsafe(24), "token_type": "Bearer", "expires_in": 30 * 24 * 3600,
+                 "refresh_token": secrets.token_urlsafe(24)}, {"Cache-Control": "no-store"}
+# --- fin de l'OAuth ouvert ---
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "meteo-mcp/1.0"
 
-    def _send(self, code, body=None, ctype="application/json"):
+    def _send(self, code, body=None, extra=None, ctype="application/json"):
         data = b"" if body is None else (body if isinstance(body, bytes) else json.dumps(body, ensure_ascii=False).encode())
         self.send_response(code)
         if body is not None:
@@ -555,12 +631,18 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(data)))
         if code == 405:
             self.send_header("Allow", "POST")
+        for k, v in (extra or {}).items():
+            self.send_header(k, v)
         self.end_headers()
         self.wfile.write(data)
 
     def do_GET(self):
         if self.path == "/healthz":
-            return self._send(200, b"ok\n", "text/plain")
+            return self._send(200, b"ok\n", ctype="text/plain")
+        chemin, _, requete = self.path.partition("?")
+        r = oauth_get(chemin, requete, self.headers)
+        if r:
+            return self._send(*r)
         # Pas de flux SSE côté serveur : la spécification demande 405 dans ce cas.
         self._send(405 if self.path.startswith("/mcp") else 404)
 
@@ -568,11 +650,14 @@ class Handler(BaseHTTPRequestHandler):
         self._send(405 if self.path.startswith("/mcp") else 404)
 
     def do_POST(self):
-        if self.path.split("?")[0] != "/mcp":
+        chemin = self.path.split("?")[0]
+        if chemin not in ("/mcp", "/register", "/token"):
             return self._send(404)
         length = int(self.headers.get("Content-Length") or 0)
         if length > MAX_BODY:
             return self._send(413)
+        if chemin != "/mcp":
+            return self._send(*oauth_post(chemin, self.rfile.read(length)))
         try:
             payload = json.loads(self.rfile.read(length) or b"null")
         except ValueError:
@@ -585,7 +670,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def log_message(self, fmt, *args):
         # Une ligne par requête, sans l'adresse du client ni le lieu demandé.
-        print(f"meteo: {self.command} {self.path} {args[1] if len(args) > 1 else ''}", file=sys.stderr, flush=True)
+        print(f"meteo: {self.command} {self.path.split("?")[0]} {args[1] if len(args) > 1 else ''}", file=sys.stderr, flush=True)
 
 
 if __name__ == "__main__":
