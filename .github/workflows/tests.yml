@@ -16,4 +16,4 @@ jobs:
       - name: Tests hors ligne
         run: python3 -m unittest discover -s tests -v
       - name: Bases Kustomize
-        run: for d in hockey meteo articles; do kubectl kustomize "$d" > /dev/null; done
+        run: for d in hockey meteo articles web; do kubectl kustomize "$d" > /dev/null; done
