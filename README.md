@@ -75,6 +75,20 @@ acceptées vont de `2024-11-05` à `2025-11-25`.
 La couche JSON-RPC est recopiée dans chaque fichier, exprès : un serveur se
 copie et se lance seul, sans module à côté.
 
+### Un OAuth qui approuve tout seul
+
+`hockey`, `meteo` et `articles` publient aussi un serveur d'autorisation OAuth
+(`/.well-known/oauth-protected-resource`, `/.well-known/oauth-authorization-server`,
+`/register`, `/authorize`, `/token`). C'est que les connecteurs personnalisés
+de Gemini refusent un serveur MCP qui n'en a pas : ils cherchent ces pages et
+abandonnent sur un 404. Les données étant publiques, `/authorize` ne demande
+rien et renvoie tout de suite un code, et `/token` rend un jeton. **`/mcp` ne
+vérifie aucun jeton** : avec ou sans, la réponse est la même, et un client qui
+ne fait pas d'OAuth (l'appli Claude, Home Assistant) ne voit pas de
+différence. Seule garde : `/authorize` ne renvoie que vers des adresses de
+retour connues (Gemini, Claude, localhost), pour ne pas servir de redirection
+ouverte. Le bloc est le même dans les trois fichiers, et un test le vérifie.
+
 ## Les lancer
 
 N'importe quel Python 3.12 ou plus récent :
@@ -144,4 +158,6 @@ reports every redirect and the final URL. The web reader is a proxy: keep it
 private; it refuses non-public addresses on every hop and pins the checked IP. Answers are in French and
 written to be read aloud. Run with `python3 <server>/server.py`; configure
 through the environment variables above. The `articles` server is open at
-`https://articles.labodeludo.dev/mcp` (rate-limited). MIT licence.
+`https://articles.labodeludo.dev/mcp` (rate-limited). The three public
+servers also expose a self-approving OAuth server (Gemini's custom connectors
+won't add an MCP server without OAuth); `/mcp` never checks the token. MIT licence.
