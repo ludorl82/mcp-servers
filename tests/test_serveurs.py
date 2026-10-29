@@ -7,7 +7,9 @@ refus des adresses locales.
 
     python3 -m unittest discover -s tests -v
 """
+import contextlib
 import importlib.util
+import io
 import json
 import os
 import threading
@@ -313,6 +315,55 @@ class OAuthOuvert(unittest.TestCase):
         self.assertEqual((code, r["result"]), (200, {}))
         code, _, _ = self.demande("/register", b"{}")
         self.assertEqual(code, 400)
+
+
+class QuiParle(unittest.TestCase):
+    def test_meme_bloc_partout(self):
+        def bloc(nom):
+            t = (RACINE / nom / "server.py").read_text()
+            return t[t.index("# --- Qui parle"):t.index("# --- fin de qui parle ---")]
+        for nom in list(SERVEURS)[1:]:
+            with self.subTest(serveur=nom):
+                self.assertEqual(bloc(nom), bloc("hockey"))
+
+    def test_la_ligne_dit_qui_sans_secret(self):
+        m = charge("meteo", HOST="127.0.0.1")
+        serveur = m.ThreadingHTTPServer(("127.0.0.1", 0), m.Handler)
+        threading.Thread(target=serveur.serve_forever, daemon=True).start()
+        self.addCleanup(serveur.shutdown)
+        base = f"http://127.0.0.1:{serveur.server_address[1]}"
+        retour = "https://oauth-redirect.googleusercontent.com/r/user_bound_custom-mcp-1-meteo_tptpt_net"
+        ouvreur = urllib.request.build_opener(type("SansSuivre", (urllib.request.HTTPRedirectHandler,),
+                                                   {"redirect_request": lambda *a: None}))
+
+        def demande(chemin, corps=None, ctype="application/json"):
+            req = urllib.request.Request(base + chemin, corps, {"User-Agent": "Google-Gemini/2.0 (x; y)",
+                                                                "Content-Type": ctype})
+            try:
+                with ouvreur.open(req) as r:
+                    return json.loads(r.read() or b"null")
+            except urllib.error.HTTPError as e:
+                return e
+
+        journal = io.StringIO()
+        with contextlib.redirect_stderr(journal):
+            client = demande("/register", json.dumps({"client_name": "Gemini Connecteur", "redirect_uris": [retour],
+                                                      "token_endpoint_auth_method": "client_secret_post"}).encode())
+            e = demande("/authorize?" + urllib.parse.urlencode({"client_id": client["client_id"], "redirect_uri": retour,
+                                                                 "response_type": "code"}))
+            code = dict(urllib.parse.parse_qsl(urllib.parse.urlparse(e.headers["Location"]).query))["code"]
+            jeton = demande("/token", urllib.parse.urlencode({"grant_type": "authorization_code", "code": code}).encode(),
+                            "application/x-www-form-urlencoded")
+            demande("/mcp", json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                                        "params": {"name": "inconnu", "arguments": {}}}).encode())
+            serveur.shutdown()
+        lignes = journal.getvalue().splitlines()
+        self.assertIn("meteo: POST /register 201 ua=Google-Gemini/2.0 client=Gemini_Connecteur", lignes)
+        self.assertIn("meteo: GET /authorize 302 ua=Google-Gemini/2.0 retour=oauth-redirect.googleusercontent.com", lignes)
+        self.assertIn("meteo: POST /token 200 ua=Google-Gemini/2.0 grant=authorization_code", lignes)
+        self.assertIn("meteo: POST /mcp 200 ua=Google-Gemini/2.0 rpc=tools/call:inconnu erreur=-32602", lignes)
+        for secret in (client["client_id"], client["client_secret"], code, jeton["access_token"], jeton["refresh_token"]):
+            self.assertNotIn(secret, journal.getvalue())
 
 
 if __name__ == "__main__":

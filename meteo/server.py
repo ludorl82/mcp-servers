@@ -620,6 +620,66 @@ def oauth_post(chemin, corps):
 # --- fin de l'OAuth ouvert ---
 
 
+# --- Qui parle : le même bloc dans chaque serveur (un test le vérifie) ---
+# La ligne de requête dit QUI appelle (l'appli Claude, Gemini, Home Assistant),
+# jamais avec un jeton ni un code : ua= le premier produit du User-Agent,
+# client= le nom donné au /register, retour= l'hôte de l'adresse de retour à
+# /authorize (claude.ai, googleusercontent.com…), grant= à /token, rpc= la
+# méthode JSON-RPC (et l'outil, pour tools/call), erreur= les codes JSON-RPC,
+# ou « outil » quand un outil rend isError. Les valeurs n'ont pas d'espace :
+# clé=valeur, que `| logfmt` lit dans Loki.
+def propre(s, n=40):
+    """Une valeur de journal : courte, sans espace ni caractère de contrôle (elle vient du client)."""
+    return re.sub(r"[^\w.:/@#+()-]", "", re.sub(r"\s+", "_", str(s).strip()))[:n] or "?"
+
+
+def rpc(m):
+    if not isinstance(m, dict):
+        return "invalide"
+    methode = str(m.get("method") or "invalide")
+    if methode == "tools/call" and isinstance(m.get("params"), dict):
+        return f"{methode}:{m['params'].get('name')}"
+    return methode
+
+
+def qui_parle(chemin, requete, entetes, corps=None):
+    """Les notes de la ligne de requête, d'après les entêtes et, une fois lu, le corps."""
+    notes = {}
+    if chemin == "/healthz":
+        return notes
+    ua = entetes.get("User-Agent")
+    notes["ua"] = propre(ua.split(" ")[0], 48) if ua else "aucun"
+    if chemin == "/authorize":
+        retour = dict(urllib.parse.parse_qsl(requete)).get("redirect_uri", "")
+        notes["retour"] = propre(urllib.parse.urlparse(retour).netloc or "aucun")
+    if not corps:
+        return notes
+    if chemin == "/token":
+        notes["grant"] = propre(dict(urllib.parse.parse_qsl(corps.decode("utf-8", "replace"))).get("grant_type") or "aucun")
+        return notes
+    try:
+        d = json.loads(corps)
+    except ValueError:
+        return notes
+    if chemin == "/register" and isinstance(d, dict):
+        notes["client"] = propre(d.get("client_name") or "client")
+    if chemin == "/mcp":
+        messages = d if isinstance(d, list) else [d]
+        notes["rpc"] = propre("+".join(rpc(m) for m in messages[:5]) + ("+etc" if len(messages) > 5 else ""), 80)
+    return notes
+
+
+def erreurs(reponses):
+    codes = []
+    for r in reponses:
+        if isinstance(r, dict) and "error" in r:
+            codes.append(str(r["error"].get("code")))
+        elif isinstance(r, dict) and isinstance(r.get("result"), dict) and r["result"].get("isError"):
+            codes.append("outil")
+    return ",".join(codes)
+# --- fin de qui parle ---
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "meteo-mcp/1.0"
 
@@ -635,6 +695,13 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header(k, v)
         self.end_headers()
         self.wfile.write(data)
+
+    def parse_request(self):
+        # Chaque requête repart à zéro : une connexion gardée ouverte en sert plusieurs.
+        ok = super().parse_request()
+        chemin, _, requete = self.path.partition("?")
+        self.notes = qui_parle(chemin, requete, self.headers) if ok else {}
+        return ok
 
     def do_GET(self):
         if self.path == "/healthz":
@@ -656,21 +723,26 @@ class Handler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length") or 0)
         if length > MAX_BODY:
             return self._send(413)
+        corps = self.rfile.read(length)
+        self.notes = qui_parle(chemin, "", self.headers, corps)
         if chemin != "/mcp":
-            return self._send(*oauth_post(chemin, self.rfile.read(length)))
+            return self._send(*oauth_post(chemin, corps))
         try:
-            payload = json.loads(self.rfile.read(length) or b"null")
+            payload = json.loads(corps or b"null")
         except ValueError:
             return self._send(400, {"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "Parse error"}})
+        replies = [r for r in map(handle, payload if isinstance(payload, list) else [payload]) if r is not None]
+        if erreurs(replies):
+            self.notes["erreur"] = erreurs(replies)
         if isinstance(payload, list):
-            replies = [r for r in map(handle, payload) if r is not None]
             return self._send(200, replies) if replies else self._send(202)
-        reply = handle(payload)
-        self._send(200, reply) if reply is not None else self._send(202)
+        self._send(200, replies[0]) if replies else self._send(202)
 
     def log_message(self, fmt, *args):
         # Une ligne par requête, sans l'adresse du client ni le lieu demandé.
-        print(f"meteo: {self.command} {self.path.split("?")[0]} {args[1] if len(args) > 1 else ''}", file=sys.stderr, flush=True)
+        notes = " ".join(f"{k}={v}" for k, v in getattr(self, "notes", {}).items())
+        print(f"meteo: {self.command} {self.path.split("?")[0]} {args[1] if len(args) > 1 else ''} {notes}".rstrip(),
+              file=sys.stderr, flush=True)
 
 
 if __name__ == "__main__":
