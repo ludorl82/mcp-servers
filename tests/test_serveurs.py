@@ -238,6 +238,8 @@ class Http(unittest.TestCase):
             with self.assertRaises(urllib.error.HTTPError) as e:
                 urllib.request.urlopen(base + chemin)
             self.assertEqual(e.exception.code, code)
+        with urllib.request.urlopen(urllib.request.Request(base + "/mcp", method="HEAD")) as r:
+            self.assertEqual((r.status, r.read()), (200, b""))
 
 
 PUBLICS = ("hockey", "meteo", "articles")
