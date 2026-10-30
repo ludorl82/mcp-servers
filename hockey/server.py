@@ -797,6 +797,10 @@ class Handler(BaseHTTPRequestHandler):
         # Pas de flux SSE côté serveur : la spécification demande 405 dans ce cas.
         self._send(405 if self.path.startswith("/mcp") else 404)
 
+    def do_HEAD(self):
+        # Gemini sonde /mcp en HEAD après tools/list ; 200 vide plutôt que le 501 de la bibliothèque (essai, hockey seul).
+        self._send(200 if self.path.startswith("/mcp") else 404)
+
     def do_DELETE(self):
         self._send(405 if self.path.startswith("/mcp") else 404)
 
