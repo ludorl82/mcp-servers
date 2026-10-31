@@ -66,7 +66,7 @@ class Protocole(unittest.TestCase):
                 self.assertEqual(appel(m, "n/importe")["error"]["code"], -32601)
                 self.assertEqual(m.handle({"id": 3, "method": "ping"})["error"]["code"], -32600)
                 self.assertEqual(appel(m, "tools/call", {"name": "absent"})["error"]["code"], -32602)
-                mauvais = appel(m, "tools/call", {"name": outil, "arguments": {"pas_un_argument": 1}})
+                mauvais = appel(m, "tools/call", {"name": outil, "arguments": [1]})
                 self.assertEqual(mauvais["error"]["code"], -32602)
 
 
@@ -366,6 +366,63 @@ class QuiParle(unittest.TestCase):
         self.assertIn("meteo: POST /mcp 200 ua=Google-Gemini/2.0 rpc=tools/call:inconnu erreur=-32602", lignes)
         for secret in (client["client_id"], client["client_secret"], code, jeton["access_token"], jeton["refresh_token"]):
             self.assertNotIn(secret, journal.getvalue())
+
+
+class ArgumentsAdmis(unittest.TestCase):
+    """Ce que Gemini envoie (2026-10-30) : des arguments en trop, des null, du texte JSON."""
+
+    def test_meme_bloc_partout(self):
+        def bloc(nom):
+            t = (RACINE / nom / "server.py").read_text()
+            return t[t.index("# --- Arguments admis"):t.index("# --- fin des arguments admis ---")]
+        for nom in list(SERVEURS)[1:]:
+            with self.subTest(serveur=nom):
+                self.assertEqual(bloc(nom), bloc("hockey"))
+
+    def test_comme_gemini(self):
+        for nom in SERVEURS:
+            with self.subTest(serveur=nom):
+                m = charge(nom)
+                m.TOOLS["sans_parametre"] = (lambda: "rien", {})
+                m.TOOLS["optionnel"] = (lambda a=1: f"a={a}", {})
+                m.TOOLS["requis"] = (lambda a: f"a={a}", {})
+
+                def texte(outil, args, absent=False):
+                    p = {"name": outil} if absent else {"name": outil, "arguments": args}
+                    r = appel(m, "tools/call", p)
+                    self.assertNotIn("error", r, r)
+                    return r["result"]["content"][0]["text"]
+
+                m._appel.notes = notes = {}
+                self.assertEqual(texte("sans_parametre", None, absent=True), "rien")
+                for args in (None, {}, "", "{}"):
+                    self.assertEqual(texte("sans_parametre", args), "rien")
+                self.assertEqual(notes, {})
+                self.assertEqual(texte("sans_parametre", {"query": "état", "zz": 2}), "rien")
+                self.assertEqual(notes, {"ignores": "query+zz"})
+                self.assertEqual(texte("optionnel", {"a": None}), "a=1")
+                self.assertEqual(texte("optionnel", '{"a": 5, "b": 0}'), "a=5")
+                self.assertEqual(texte("requis", {"a": 3, "en_trop": True}), "a=3")
+                for args, note in (([1], "list"), ("pas du json", "texte"), (7, "int")):
+                    r = appel(m, "tools/call", {"name": "sans_parametre", "arguments": args})
+                    self.assertEqual(r["error"]["code"], -32602)
+                    self.assertEqual(notes["args"], note)
+                # Un argument requis qui manque reste une vraie erreur.
+                self.assertEqual(appel(m, "tools/call", {"name": "requis", "arguments": {"a": None}})["error"]["code"], -32602)
+                del m._appel.notes
+
+    def test_hockey_renomme(self):
+        m = charge("hockey")
+        self.assertEqual(m.arguments_admis(lambda equipe_=None, jour_=None: None,
+                                           {"equipe": "Oilers", "jour": None, "x": 1}, m.RENOMME),
+                         {"equipe_": "Oilers"})
+
+    def test_le_journal_garde_les_noms(self):
+        m = charge("meteo")
+        m._appel.notes = notes = {}
+        m.arguments_admis(lambda: None, {"secret valeur\n": "ne sort pas"})
+        self.assertEqual(notes, {"ignores": "secret?valeur?"})
+        del m._appel.notes
 
 
 if __name__ == "__main__":
