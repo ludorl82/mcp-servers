@@ -22,6 +22,7 @@ démarrage.
 Les réponses sont écrites pour être LUES À VOIX HAUTE : des phrases courtes en
 français, pas de tableaux, l'heure de l'Est.
 """
+import inspect
 import json
 import os
 import re
@@ -581,6 +582,50 @@ INSTRUCTIONS = ("Les sept équipes canadiennes de la LNH : horaire, pointage en 
                 "Les réponses sont déjà en phrases courtes, prêtes à lire à voix haute.")
 
 
+# --- Arguments admis : le même bloc dans chaque serveur MCP du labo (un test le vérifie) ---
+# Gemini (2026-10-30) appelait un outil qui ne prend aucun paramètre avec des
+# arguments quand même : chaque premier appel tombait en -32602.
+# Comme le veut JSON Schema sans additionalProperties: false, une clé inconnue
+# est ignorée, et une valeur null vaut une clé absente (le défaut de la fonction
+# s'applique). Des arguments envoyés en texte JSON sont décodés ; tout autre
+# chose qu'un objet rend None, et l'appel -32602. Le journal garde les NOMS
+# écartés (ignores=), jamais les valeurs. Recopié tel quel dans les autres
+# serveurs MCP du labo : garder toutes les copies identiques.
+_appel = threading.local()
+
+
+def note_appel(cle, valeur):
+    """Une note pour la ligne de la requête en cours ; sans ligne ouverte, une ligne à elle."""
+    valeur = "".join(c if c.isascii() and (c.isalnum() or c in "_-+.") else "?" for c in str(valeur))[:80]
+    notes = getattr(_appel, "notes", None)
+    if notes is None:
+        print(f"arguments: {cle}={valeur}", file=sys.stderr, flush=True)
+    else:
+        notes[cle] = valeur
+
+
+def arguments_admis(fn, args, renomme=None):
+    """Les arguments d'un tools/call, ramenés à ce que la fonction de l'outil accepte."""
+    if args is None or args == "":
+        return {}
+    if isinstance(args, str):
+        try:
+            args = json.loads(args)
+        except ValueError:
+            note_appel("args", "texte")
+            return None
+    if not isinstance(args, dict):
+        note_appel("args", type(args).__name__)
+        return None
+    connus = inspect.signature(fn).parameters
+    renomme = renomme or {}
+    ignores = sorted(k for k, v in args.items() if renomme.get(k, k) not in connus or v is None)
+    if ignores:
+        note_appel("ignores", "+".join(ignores))
+    return {renomme.get(k, k): v for k, v in args.items() if renomme.get(k, k) in connus and v is not None}
+# --- fin des arguments admis ---
+
+
 # --- JSON-RPC ----------------------------------------------------------------
 
 
@@ -615,7 +660,9 @@ def handle(msg):
         tool = TOOLS.get(params.get("name"))
         if not tool:
             return err(-32602, f"Outil inconnu : {params.get('name')}")
-        args = {RENOMME.get(k, k): val for k, val in (params.get("arguments") or {}).items()}
+        args = arguments_admis(tool[0], params.get("arguments"), RENOMME)
+        if args is None:
+            return err(-32602, "Arguments invalides : un objet JSON est attendu.")
         try:
             text, is_error = tool[0](**args), False
         except TypeError as e:
@@ -813,6 +860,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(413)
         corps = self.rfile.read(length)
         self.notes = qui_parle(chemin, "", self.headers, corps)
+        _appel.notes = self.notes
         if chemin != "/mcp":
             return self._send(*oauth_post(chemin, corps))
         try:
